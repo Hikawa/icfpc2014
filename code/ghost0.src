@@ -1,0 +1,381 @@
+; icfpc2014: icfp contest 2014
+; Copyright (C) 2014  The sound of lambda team
+;
+; This program is free software: you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation, either version 3 of the License, or
+; (at your option) any later version.
+;
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+; Ghost that runs to the player in normal mode
+; but runs FROM player in fright mode
+; if player_x < ghost_x and not wall_up:
+;     return up
+; else if player_x > ghost_x and not wall_down:
+;     return down
+; else if player_y < ghost_y and not wall_left:
+;     return left
+; else
+;     return right
+
+; implement kind of priorities for each direction,
+; increment/decrement them depending on different conditions
+; then select direction with max priority
+; in fright mode invert all priorities
+
+; TODO (fix directions): if player is to the left, go left, not up
+; TODO (surround):
+;   if >1 directions available
+;   and there's another ghost in one of them
+;   go the other way
+; TODO:
+;   if there's another ghost exactly between me and lambdaman
+;   try to turn, not follow (e.g. assume no strict lman i.e. &0111)
+; TODO:
+;   predict power pill and run away from the player that is next to power pill
+;   (can it make things worse because of fright-mode direction reverse?)
+; TODO:
+;   check nearby ghosts only to save some resources, i.e. index-10...index+10
+
+;   #####                #####                #####            
+;   #   # Priorities:    #  =# Priorities:    #   # Priorities:
+; ### #\#    up: 1110  ### # #    up: 0100  ### # #    up: 0110
+;    == # right: 1100     = \# right: 1100     ==\# right: 1100
+; ### # #  down: 0010  ### # #  down: 0111  ### # #  down: 0110
+;   #   #  left: 0011    #   #  left: 0011    #   #  left: 0011
+; bits: MmGg000
+;   0 - lowest bits, set to 0 for all ghosts except (index&3)
+;   g - there're NO ghosts in that not-strict direction (e.g. ghost_up or ghost_down for direction_right)
+;   G - there're NO ghosts in that strict direction
+;   m - there's a lMan in that non-strict direction
+;   M - there's a lMan in that strict direction
+; TODO:
+;   adjust lowest bit to make sure that different ghosts go to different directions
+;   when other conditions are equal
+
+;   [up] c       = player_y <= ghost_y    - normal condition
+;   [up] c == 0  = player_y > ghost_y     - we conditionally set 0 there
+;   [up] c == 0  = !(player_y <= ghost_y) - we write 'else' condition, which is also inverted
+
+; registers: a b c d e f g h
+
+;; get all cells around the ghost into [0] [1] [2] [3]:
+int 3     ; a = ghost_index
+int 5     ; a,b = ghost_x(a),ghost_y(a)
+mov c,a
+mov d,b   ; c,d = ghost_x,ghost_y
+
+sub b,1
+int 7     ; a = map[a,b]
+mov [0],a ; [0] = map[ghost_x,ghost_y-1]
+
+mov a,c
+mov b,d
+add a,1
+int 7     ; a = map[a,b]
+mov [1],a ; [1] = map[ghost_x+1,ghost_y]
+
+mov a,c
+mov b,d
+add b,1
+int 7     ; a = map[a,b]
+mov [2],a ; [2] = map[ghost_x,ghost_y+1]
+
+mov a,c
+mov b,d
+sub a,1
+int 7     ; a = map[a,b]
+mov [3],a ; [3] = map[ghost_x-1,ghost_y]
+
+;; set: [8]=ghost_index, [9]=ghost_index-10, [10]=ghost_index+10
+int 3     ; a = ghost_index
+mov [8],a ; save ghost_index in [8]
+; if a>10: [9]=a-10; else [9]=0
+mov [9],a
+sub [9],10
+jgt _manyghosts1,a,10
+mov [9],0
+_manyghosts1:
+mov [10],a
+add [10],10
+
+int 6     ; a,b = ghost_vitality(a), ghost_direction(a)
+;int 8     ; print pc,a,b,c,d,e,f,g,h ; DEBUG
+
+;; ghost can't move in opposite direction, mark that direction with a wall
+;; i.e. 0->[2]=0, 1->[3]=0, 2->[0]=0, 3->[1]=0
+add b,2
+and b,3
+mov [b],0 ; [(ghost_direction+2)%4]=0
+
+;; mark all priorities to be either 0 or 127
+jeq _up_wall,[0],0
+mov [0],127
+_up_wall:
+jeq _right_wall,[1],0
+mov [1],127
+_right_wall:
+jeq _down_wall,[2],0
+mov [2],127
+_down_wall:
+jeq _left_wall,[3],0
+mov [3],127
+_left_wall:
+
+int 1   ; a,b = player_x,player_y;  we still have: c,d = ghost_x,ghost_y
+;; bit1: decrease priorities having a player in that direction
+jlt _player_up,b,d
+and [0],63 ; 0111111
+_player_up:
+jgt _player_right,a,c
+and [1],63 ; 0111111
+_player_right:
+jgt _player_down,b,d
+and [2],63 ; 0111111
+_player_down:
+jlt _player_left,a,c
+and [3],63 ; 0111111
+_player_left:
+
+;; bit2: fill non-strict priorities
+jlt _player_upeq,b,d
+jeq _player_upeq,b,d
+and [0],95 ; 1011111
+_player_upeq:
+jgt _player_righteq,a,c
+jeq _player_righteq,a,c
+and [1],95 ; 1011111
+_player_righteq:
+jgt _player_downeq,b,d
+jeq _player_downeq,b,d
+and [2],95 ; 1011111
+_player_downeq:
+jlt _player_lefteq,a,c
+jeq _player_lefteq,a,c
+and [3],95 ; 1011111
+_player_lefteq:
+
+mov [4],a       ; store player_x in [4] for later use
+mov [5],b       ; store player_y in [5] for later use
+
+;; prepare bit mask from all the ghosts: UuRrDdLl ("U" - strict up, "u" nonstrict up)
+; note, it's a positive mask, meaning there IS a ghost [stictly] up/right/down/left
+; U = ghost_y < self_y = !(ghost_y >= self_y) = !(ghost_y > self_y) && !(ghost_y = self_y)
+; u = ghost_y <= self_y = !(ghost_y > self_y)
+
+mov f,0   ; that's our future bitmask
+;mov g,255 ; ghosts index
+mov g,[9] ; g=ghost_min
+dec g
+
+_ghosts_loop:
+inc g
+jeq _ghosts_loop,g,[8] ; skip self ghost
+mov a,g
+mov b,0
+int 5     ; a,b = ghost_x(a),ghost_y(a)
+jeq _ghosts_loop_end,b,0 ; ghost_y can't be zero, it means there's no such ghost
+
+jlt _ghost_upeq,b,d
+or f,4  ; 00000100 == .....d..
+jeq _ghost_upeq,b,d
+or f,8  ; 00001000 == ....D...
+_ghost_upeq:
+jgt _ghost_righteq,a,c
+or f,1  ; 00000001 == .......l
+jeq _ghost_righteq,a,c
+or f,2  ; 00000010 == ......L.
+_ghost_righteq:
+jgt _ghost_downeq,b,d
+or f,64 ; 01000000 == .u......
+jeq _ghost_downeq,b,d
+or f,128; 10000000 == U.......
+_ghost_downeq:
+jlt _ghost_lefteq,a,c
+or f,16 ; 00010000 == ...r....
+jeq _ghost_lefteq,a,c
+or f,32 ; 00100000 == ..R.....
+_ghost_lefteq:
+
+jlt _ghosts_loop,g,[10] ; we use ~32 instructions per ghost, so we can check no more than ~30 ghosts
+_ghosts_loop_end:
+
+mov [10],g ; [10] == ghost_max+1 == ghost_count
+
+;; bit3: there're no other ghosts in that strict direction
+;; bit4: there're no other ghosts in that non-strict direction
+mov a,f
+and a,192 ; 11000000 == Uu......
+div a,8   ; ...Uu...
+xor a,255 ; turn positive bitmask into negative
+and [0],a
+
+mov a,f   
+and a,48  ; 00110000 == ..Rr....
+div a,2   ; ...Rr...
+xor a,255 ; turn positive bitmask into negative
+and [1],a
+
+mov a,f
+and a,12  ; 00001100 == ....Dd..
+mul a,2   ; ...Dd...
+xor a,255 ; turn positive bitmask into negative
+and [2],a
+
+;mov a,f ; save one instruction
+and f,3   ; 00000011 == ......Ll
+mul f,8   ; ...Ll...
+xor f,255 ; turn positive bitmask into negative
+and [3],f
+
+;; if player and ghost are in line check for other ghosts between them
+mov g,[9] ; prepare ghosts index once, don't set it 4 times
+jeq _linecheck_equalx,[4],c
+jeq _linecheck_equaly,[5],d
+_linecheck_end:
+
+;; set all low bits to zero except (ghost_index&3)
+and [8],3
+jeq _ghost0,[8],0
+and [0],254
+_ghost0:
+jeq _ghost1,[8],1
+and [1],254
+_ghost1:
+jeq _ghost2,[8],2
+and [2],254
+_ghost2:
+jeq _ghost3,[8],3
+and [3],254
+_ghost3:
+
+;; Invert all priorities for fright mode
+int 3     ; a = ghost_index
+int 6     ; a,b = ghost_vitality(a), ghost_direction(a)
+jeq _normal_mode,a,0 ; normal
+jeq _normal_mode,a,2 ; invisible
+mov a,0
+sub a,[0]
+mov [0],a
+mov a,0
+sub a,[1]
+mov [1],a
+mov a,0
+sub a,[2]
+mov [2],a
+mov a,0
+sub a,[3]
+mov [3],a
+_normal_mode:
+
+;; find max priority:
+;mov g,3
+;mov h,3 ; current index
+;_max_loop:
+;dec h
+;jlt _less_than,[h],[g]
+;mov g,h
+;_less_than:
+;jgt _max_loop,h,0
+
+;; find max priority (unloop):
+mov a,3 ; best index
+jgt _morethan2,[a],[2]
+mov a,2
+_morethan2:
+jgt _morethan1,[a],[1]
+mov a,1
+_morethan1:
+jgt _morethan0,[a],[0]
+mov a,0
+_morethan0:
+
+;mov b,111 ; DEBUG
+;int 8     ; print pc,a,b,c,d,e,f,g,h ; DEBUG
+;mov a,g
+int 0 ; ghost_direction = a
+hlt
+
+; ============== LineCheck ==============
+; check for other ghosts between this ghost and player
+; a == [4] == player_x
+; b == [5] == player_y
+; c == selfghost_x
+; d == selfghost_y
+; g == 0 - counter
+; [8] == selfghost index
+; [10] == ghosts_count
+
+_linecheck_equalx: ; player is either up or down
+jgt _linecheck_playerdown,[5],d
+
+_linecheck_playerup:    ; player_x == selfghost_x && player_y < selfghost_y
+  jeq _linecheck_playerup_next,g,[8] ; if g == selfghost_index: continue
+  mov a,g
+  int 5     ; a,b = ghost_x(a),ghost_y(a)
+  jlt _linecheck_playerup_next,a,c   ; if ghost_x < selfghost_x: continue
+  jgt _linecheck_playerup_next,a,c   ; if ghost_x > selfghost_x: continue
+  jgt _linecheck_playerup_next,b,d   ; if ghost_y > selfghost_y: continue
+  jlt _linecheck_playerup_next,b,[5] ; if ghost_y < player_y: continue - its from the other side of the player
+    and [0],63 ; 0111111 - found another ghost, mark as if there's no player strictly up
+    mov pc,_linecheck_end
+_linecheck_playerup_next:
+  inc g
+jlt _linecheck_playerup,g,[10] ; if g < ghost_count
+mov pc,_linecheck_end
+
+_linecheck_playerdown:  ; player_x == selfghost_x && player_y > selfghost_y
+  jeq _linecheck_playerdown_next,g,[8] ; if g == selfghost_index: continue
+  mov a,g
+  int 5     ; a,b = ghost_x(a),ghost_y(a)
+  jlt _linecheck_playerdown_next,a,c   ; if ghost_x < selfghost_x: continue
+  jgt _linecheck_playerdown_next,a,c   ; if ghost_x > selfghost_x: continue
+  jlt _linecheck_playerdown_next,b,d   ; if ghost_y < selfghost_y: continue
+  jgt _linecheck_playerdown_next,b,[5] ; if ghost_y > player_y: continue - its from the other side of the player
+    and [2],63 ; 0111111 - found another ghost, mark as if there's no player strictly up
+    mov pc,_linecheck_end
+_linecheck_playerdown_next:
+  inc g
+jlt _linecheck_playerdown,g,[10] ; if g < ghost_count
+mov pc,_linecheck_end
+
+_linecheck_equaly:
+jgt _linecheck_playerright,[4],c
+
+_linecheck_playerleft:
+  jeq _linecheck_playerleft_next,g,[8] ; if g == selfghost_index: continue
+  mov a,g
+  int 5     ; a,b = ghost_x(a),ghost_y(a)
+  jlt _linecheck_playerleft_next,b,d   ; if ghost_y < selfghost_y: continue
+  jgt _linecheck_playerleft_next,b,d   ; if ghost_y > selfghost_y: continue
+  jgt _linecheck_playerleft_next,a,c   ; if ghost_x > selfghost_x: continue
+  jlt _linecheck_playerleft_next,a,[4] ; if ghost_x < player_x: continue - its from the other side of the player
+    and [3],63 ; 0111111 - found another ghost, mark as if there's no player strictly up
+    mov pc,_linecheck_end
+_linecheck_playerleft_next:
+  inc g
+jlt _linecheck_playerleft,g,[10] ; if g < ghost_count
+mov pc,_linecheck_end
+
+_linecheck_playerright:
+  jeq _linecheck_playerright_next,g,[8] ; if g == selfghost_index: continue
+  mov a,g
+  int 5     ; a,b = ghost_x(a),ghost_y(a)
+  jlt _linecheck_playerright_next,b,d   ; if ghost_y < selfghost_y: continue
+  jgt _linecheck_playerright_next,b,d   ; if ghost_y > selfghost_y: continue
+  jlt _linecheck_playerright_next,a,c   ; if ghost_x < selfghost_x: continue
+  jgt _linecheck_playerright_next,a,[4] ; if ghost_x > player_x: continue - its from the other side of the player
+    and [1],63 ; 0111111 - found another ghost, mark as if there's no player strictly up
+    mov pc,_linecheck_end
+_linecheck_playerright_next:
+  inc g
+jlt _linecheck_playerright,g,[10] ; if g < ghost_count
+mov pc,_linecheck_end
+
